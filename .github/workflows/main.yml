@@ -10,7 +10,7 @@ jobs:
     # runners with more vCPUs (e.g., 8, 16) and a more powerful GPU.
     # NOTE: You MUST be on a GitHub Team or Enterprise plan to use these runners.
     # Please verify the exact runner label available in your organization's settings.
-    runs-on: windows-xlarge-gpu
+    runs-on: windows-latest
 
     # The maximum timeout is 360 hours (21600 minutes) on paid plans.
     timeout-minutes: 21600
