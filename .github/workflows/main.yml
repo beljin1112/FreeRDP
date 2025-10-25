@@ -1,0 +1,100 @@
+name: Windows RDP with Max GPU and CPU
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually from the Actions tab
+
+jobs:
+  rdp-session:
+    # ⬇️ MODIFICATION: Requesting the largest available GPU runner.
+    # Labels like 'windows-xlarge-gpu' or 'windows-latest-16-cores-gpu' specify
+    # runners with more vCPUs (e.g., 8, 16) and a more powerful GPU.
+    # NOTE: You MUST be on a GitHub Team or Enterprise plan to use these runners.
+    # Please verify the exact runner label available in your organization's settings.
+    runs-on: windows-xlarge-gpu
+
+    # The maximum timeout is 360 hours (21600 minutes) on paid plans.
+    timeout-minutes: 21600
+
+    steps:
+      - name: ⚙️ PREVENT SLEEP - Disable Sleep and Hibernate
+        run: |
+          # Disable hibernation to save disk space
+          powercfg /hibernate off
+          # Set monitor and sleep timeouts to 'Never' when plugged in
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change standby-timeout-ac 0
+        shell: cmd
+
+      - name: Configure RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # The following lines lower security by disabling Network Level Authentication (NLA).
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Configure firewall to allow RDP connections
+          netsh advfirewall firewall add rule name="Allow RDP" dir=in action=allow protocol=TCP localport=3389
+
+          # Restart the service to apply changes
+          Restart-Service -Name TermService -Force
+        shell: powershell
+
+      - name: Create RDP User
+        run: |
+          # Generate a secure, random 16-character password
+          $password = -join ([char[]]([char]33..[char]126) | Get-Random -Count 16)
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Create the user and add them to the correct groups for RDP and Admin access
+          New-LocalUser -Name "runner" -Password $securePass -FullName "RDP User" -Description "Temporary RDP user."
+          Add-LocalGroupMember -Group "Administrators" -Member "runner"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runner"
+          
+          # Save credentials for the final step
+          echo "RDP_USER=runner" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Install and Connect Tailscale
+        run: |
+          # Use the URL for the latest stable version of Tailscale.
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          # Download and install silently
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          
+          # Connect to Tailscale using your secret auth key
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=github-gpu-runner-$env:GITHUB_RUN_ID
+          
+          # Wait a few seconds and retrieve the Tailscale IP address
+          Start-Sleep -Seconds 10
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          
+          if (-not $tsIP) {
+            Write-Error "Failed to get Tailscale IP. Check your auth key."
+            exit 1
+          }
+          
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: 🟢 KEEP ALIVE - Display Connection Info
+        run: |
+          Write-Host "✅ RDP Session is Ready!"
+          Write-Host "=========================="
+          Write-Host "Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          Write-Host "Username:     ${{ env.RDP_USER }}"
+          Write-Host "Password:     ${{ env.RDP_PASSWORD }}"
+          Write-Host "=========================="
+          Write-Host "This job will continue running. To stop it, manually cancel the workflow run in the GitHub Actions tab."
+          
+          # Infinite loop to keep the runner alive
+          while ($true) {
+            Start-Sleep -Seconds 600
+          }
+        shell: powershell
